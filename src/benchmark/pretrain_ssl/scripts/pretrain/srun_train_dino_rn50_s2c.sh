@@ -43,6 +43,12 @@ srun python -u pretrain_dino_s2c.py \
 --warmup_epochs 10 \
 --lr 0.03 \
 --optimizer sgd \
+--objective dino_v3 \
+--koleo_weight 0.1 \
+--use_koleo true \
+--head_nlayers 3 \
+--head_hidden_dim 2048 \
+--head_bottleneck_dim 256 \
 --weight_decay 1e-4 \
 --weight_decay_end 1e-4 \
 --global_crops_scale 0.14 1 \

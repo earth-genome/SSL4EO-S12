@@ -34,6 +34,7 @@ from torchvision import models as torchvision_models
 from models.dino import utils
 import models.dino.vision_transformer as vits
 from models.dino.vision_transformer import DINOHead
+from models.dino.objectives import build_dino_objective
 
 
 from datasets.SSL4EO.ssl4eo_dataset_lmdb import LMDBDataset
@@ -74,6 +75,16 @@ def get_args_parser():
         We recommend setting a higher value with small batches: for example use 0.9995 with batch size of 256.""")
     parser.add_argument('--use_bn_in_head', default=False, type=utils.bool_flag,
         help="Whether to use batch normalizations in projection head (Default: False)")
+    parser.add_argument('--objective', default='dino_v3', type=str, choices=['dino_v2', 'dino_v3'],
+        help='Objective to optimize during pretraining.')
+    parser.add_argument('--head_nlayers', default=3, type=int,
+        help='Number of MLP layers in DINO projection head.')
+    parser.add_argument('--head_hidden_dim', default=2048, type=int,
+        help='Hidden dimension in DINO projection head.')
+    parser.add_argument('--head_bottleneck_dim', default=256, type=int,
+        help='Bottleneck dimension in DINO projection head.')
+    parser.add_argument('--head_use_weight_norm', default=True, type=utils.bool_flag,
+        help='Use weight normalization in DINO projection head output layer.')
 
     # Temperature teacher parameters
     parser.add_argument('--warmup_teacher_temp', default=0.04, type=float,
@@ -84,6 +95,14 @@ def get_args_parser():
         starting with the default value of 0.04 and increase this slightly if needed.""")
     parser.add_argument('--warmup_teacher_temp_epochs', default=0, type=int,
         help='Number of warmup epochs for the teacher temperature (Default: 30).')
+    parser.add_argument('--student_temp', default=0.1, type=float,
+        help='Temperature for student logits.')
+    parser.add_argument('--center_momentum', default=0.9, type=float,
+        help='EMA momentum for teacher output centering.')
+    parser.add_argument('--koleo_weight', default=0.1, type=float,
+        help='KoLeo regularization weight used by dino_v3 objective.')
+    parser.add_argument('--use_koleo', default=True, type=utils.bool_flag,
+        help='Enable KoLeo regularization for dino_v3 objective.')
 
     # Training/Optimization parameters
     parser.add_argument('--use_fp16', type=utils.bool_flag, default=True, help="""Whether or not
@@ -175,7 +194,8 @@ def train_dino(args):
         args.global_crops_scale,
         args.local_crops_scale,
         args.local_crops_number,
-        args.season
+        args.season,
+        args.in_size,
     )
     
     if args.bands == 'RGB':
@@ -250,10 +270,22 @@ def train_dino(args):
         args.out_dim,
         use_bn=args.use_bn_in_head,
         norm_last_layer=args.norm_last_layer,
+        nlayers=args.head_nlayers,
+        hidden_dim=args.head_hidden_dim,
+        bottleneck_dim=args.head_bottleneck_dim,
+        use_weight_norm=args.head_use_weight_norm,
     ))
     teacher = utils.MultiCropWrapper(
         teacher,
-        DINOHead(embed_dim, args.out_dim, args.use_bn_in_head),
+        DINOHead(
+            embed_dim,
+            args.out_dim,
+            args.use_bn_in_head,
+            nlayers=args.head_nlayers,
+            hidden_dim=args.head_hidden_dim,
+            bottleneck_dim=args.head_bottleneck_dim,
+            use_weight_norm=args.head_use_weight_norm,
+        ),
     )
     # move networks to gpu
     student, teacher = student.cuda(), teacher.cuda()
@@ -278,14 +310,7 @@ def train_dino(args):
     print(f"Student and Teacher are built: they are both {args.arch} network.")
 
     # ============ preparing loss ... ============
-    dino_loss = DINOLoss(
-        args.out_dim,
-        args.local_crops_number + 2,  # total number of crops = 2 global crops + local_crops_number
-        args.warmup_teacher_temp,
-        args.teacher_temp,
-        args.warmup_teacher_temp_epochs,
-        args.epochs,
-    ).cuda()
+    dino_loss = build_dino_objective(args).cuda()
 
     # ============ preparing optimizer ... ============
     params_groups = utils.get_params_groups(student)
@@ -328,6 +353,7 @@ def train_dino(args):
             optimizer=optimizer,
             fp16_scaler=fp16_scaler,
             dino_loss=dino_loss,
+            objective=dino_loss,
         )
     start_epoch = to_restore["epoch"]
 
@@ -346,10 +372,14 @@ def train_dino(args):
         save_dict = {
             'student': student.state_dict(),
             'teacher': teacher.state_dict(),
+            'student_backbone': student.module.backbone.state_dict(),
+            'teacher_backbone': teacher_without_ddp.backbone.state_dict(),
             'optimizer': optimizer.state_dict(),
             'epoch': epoch + 1,
             'args': args,
             'dino_loss': dino_loss.state_dict(),
+            'objective': dino_loss.state_dict(),
+            'objective_name': args.objective,
         }
         if fp16_scaler is not None:
             save_dict['fp16_scaler'] = fp16_scaler.state_dict()
@@ -388,7 +418,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         with torch.cuda.amp.autocast(fp16_scaler is not None):
             teacher_output = teacher(images[:2])  # only the 2 global views pass through the teacher
             student_output = student(images)
-            loss = dino_loss(student_output, teacher_output, epoch)
+            loss, loss_terms = dino_loss(student_output, teacher_output, epoch)
 
         if not math.isfinite(loss.item()):
             print("Loss is {}, stopping training".format(loss.item()), force=True)
@@ -423,69 +453,14 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         # logging
         torch.cuda.synchronize()
         metric_logger.update(loss=loss.item())
+        metric_logger.update(dino=loss_terms["dino_loss"].item())
+        metric_logger.update(koleo=loss_terms["koleo_loss"].item())
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(wd=optimizer.param_groups[0]["weight_decay"])
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-
-
-class DINOLoss(nn.Module):
-    def __init__(self, out_dim, ncrops, warmup_teacher_temp, teacher_temp,
-                 warmup_teacher_temp_epochs, nepochs, student_temp=0.1,
-                 center_momentum=0.9):
-        super().__init__()
-        self.student_temp = student_temp
-        self.center_momentum = center_momentum
-        self.ncrops = ncrops
-        self.register_buffer("center", torch.zeros(1, out_dim))
-        # we apply a warm up for the teacher temperature because
-        # a too high temperature makes the training instable at the beginning
-        self.teacher_temp_schedule = np.concatenate((
-            np.linspace(warmup_teacher_temp,
-                        teacher_temp, warmup_teacher_temp_epochs),
-            np.ones(nepochs - warmup_teacher_temp_epochs) * teacher_temp
-        ))
-
-    def forward(self, student_output, teacher_output, epoch):
-        """
-        Cross-entropy between softmax outputs of the teacher and student networks.
-        """
-        student_out = student_output / self.student_temp
-        student_out = student_out.chunk(self.ncrops)
-
-        # teacher centering and sharpening
-        temp = self.teacher_temp_schedule[epoch]
-        teacher_out = F.softmax((teacher_output - self.center) / temp, dim=-1)
-        teacher_out = teacher_out.detach().chunk(2)
-
-        total_loss = 0
-        n_loss_terms = 0
-        for iq, q in enumerate(teacher_out):
-            for v in range(len(student_out)):
-                if v == iq:
-                    # we skip cases where student and teacher operate on the same view
-                    continue
-                loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
-                total_loss += loss.mean()
-                n_loss_terms += 1
-        total_loss /= n_loss_terms
-        self.update_center(teacher_output)
-        return total_loss
-
-    @torch.no_grad()
-    def update_center(self, teacher_output):
-        """
-        Update center used for teacher output.
-        """
-        batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
-        dist.all_reduce(batch_center)
-        batch_center = batch_center / (len(teacher_output) * dist.get_world_size())
-
-        # ema update
-        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
-
 
 
 class DataAugmentationDINO(object):
@@ -547,7 +522,7 @@ class DataAugmentationDINO(object):
         
         
 class DataAugmentationDINO_S2(object):
-    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number, season='fixed'):
+    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number, season='fixed', in_size=224):
         flip_and_color_jitter = cvtransforms.Compose([
             cvtransforms.RandomHorizontalFlip(p=0.5),
             cvtransforms.RandomApply([
@@ -563,14 +538,14 @@ class DataAugmentationDINO_S2(object):
         
         # first global crop
         self.global_transfo1 = cvtransforms.Compose([
-            cvtransforms.RandomResizedCrop(args.in_size, scale=global_crops_scale, interpolation='BICUBIC'),
+            cvtransforms.RandomResizedCrop(in_size, scale=global_crops_scale, interpolation='BICUBIC'),
             flip_and_color_jitter,
             cvtransforms.RandomApply([GaussianBlur([.1, 2.])], p=1.0),
             normalize,
         ])
         # second global crop
         self.global_transfo2 = cvtransforms.Compose([
-            cvtransforms.RandomResizedCrop(args.in_size, scale=global_crops_scale, interpolation='BICUBIC'),
+            cvtransforms.RandomResizedCrop(in_size, scale=global_crops_scale, interpolation='BICUBIC'),
             flip_and_color_jitter,
             cvtransforms.RandomApply([GaussianBlur([.1, 2.])], p=0.1),
             cvtransforms.RandomApply([Solarize(128)], p=0.2),

@@ -255,7 +255,17 @@ def vit_base(patch_size=16, **kwargs):
 
 
 class DINOHead(nn.Module):
-    def __init__(self, in_dim, out_dim, use_bn=False, norm_last_layer=True, nlayers=3, hidden_dim=2048, bottleneck_dim=256):
+    def __init__(
+        self,
+        in_dim,
+        out_dim,
+        use_bn=False,
+        norm_last_layer=True,
+        nlayers=3,
+        hidden_dim=2048,
+        bottleneck_dim=256,
+        use_weight_norm=True,
+    ):
         super().__init__()
         nlayers = max(nlayers, 1)
         if nlayers == 1:
@@ -273,10 +283,13 @@ class DINOHead(nn.Module):
             layers.append(nn.Linear(hidden_dim, bottleneck_dim))
             self.mlp = nn.Sequential(*layers)
         self.apply(self._init_weights)
-        self.last_layer = nn.utils.weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
-        self.last_layer.weight_g.data.fill_(1)
-        if norm_last_layer:
-            self.last_layer.weight_g.requires_grad = False
+        if use_weight_norm:
+            self.last_layer = nn.utils.weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
+            self.last_layer.weight_g.data.fill_(1)
+            if norm_last_layer:
+                self.last_layer.weight_g.requires_grad = False
+        else:
+            self.last_layer = nn.Linear(bottleneck_dim, out_dim, bias=False)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):

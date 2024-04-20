@@ -1,0 +1,31 @@
+[project]
+name = "ssl4eo-s12"
+version = "0.1.0"
+description = "SSL4EO-S12 benchmarking and pretraining codebase"
+requires-python = ">=3.10"
+dependencies = [
+  "einops",
+  "h5py",
+  "lmdb",
+  "numpy",
+  "opencv-python",
+  "pillow",
+  "requests",
+  "scikit-learn",
+  "scipy",
+  "tensorboard",
+  "tensorboardx",
+  "timm",
+  "torch",
+  "torchvision",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy",
+  "pytest",
+  "ruff",
+]
+
+[tool.uv]
+package = false

@@ -1,0 +1,29 @@
+[project]
+name = "ssl4eo-data2vec-pretrain"
+version = "0.1.0"
+description = "Data2Vec pretraining dependencies for SSL4EO-S12"
+requires-python = ">=3.10"
+dependencies = [
+  "blobfile",
+  "einops",
+  "numpy",
+  "pillow",
+  "requests",
+  "scipy",
+  "tensorboardx",
+  "timm",
+  "torch",
+  "torchvision",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy",
+  "pytest",
+]
+distributed = [
+  "deepspeed",
+]
+
+[tool.uv]
+package = false

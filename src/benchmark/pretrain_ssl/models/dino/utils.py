@@ -91,10 +91,24 @@ class Solarization(object):
 
 def load_pretrained_weights(model, pretrained_weights, checkpoint_key, model_name, patch_size):
     if os.path.isfile(pretrained_weights):
-        state_dict = torch.load(pretrained_weights, map_location="cpu")
-        if checkpoint_key is not None and checkpoint_key in state_dict:
+        checkpoint = torch.load(pretrained_weights, map_location="cpu")
+        state_dict = checkpoint
+        if checkpoint_key is not None and checkpoint_key in checkpoint:
             print(f"Take key {checkpoint_key} in provided checkpoint dict")
-            state_dict = state_dict[checkpoint_key]
+            state_dict = checkpoint[checkpoint_key]
+        elif isinstance(checkpoint, dict):
+            fallback_keys = [
+                "teacher_backbone",
+                "teacher",
+                "student_backbone",
+                "student",
+                "state_dict",
+                "model",
+            ]
+            selected = next((k for k in fallback_keys if k in checkpoint), None)
+            if selected is not None:
+                print(f"Checkpoint key '{checkpoint_key}' not found. Falling back to '{selected}'.")
+                state_dict = checkpoint[selected]
         # remove `module.` prefix
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
         # remove `backbone.` prefix induced by multicrop wrapper

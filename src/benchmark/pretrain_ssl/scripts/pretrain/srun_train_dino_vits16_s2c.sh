@@ -44,6 +44,12 @@ srun python -u pretrain_dino_s2c.py \
 --warmup_epochs 10 \
 --lr 1.5e-4 \
 --optimizer adamw \
+--objective dino_v3 \
+--koleo_weight 0.1 \
+--use_koleo true \
+--head_nlayers 3 \
+--head_hidden_dim 2048 \
+--head_bottleneck_dim 256 \
 --dist_url $dist_url \
 --seed 42 \
 --mode s2c \
