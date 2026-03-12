@@ -184,7 +184,7 @@ def cancel_gradients_last_layer(epoch, model, freeze_last_layer):
             p.grad = None
 
 
-def restart_from_checkpoint(ckp_path, run_variables=None, **kwargs):
+def restart_from_checkpoint(ckp_path, run_variables=None, drop_key_substrings=None, **kwargs):
     """
     Re-start from checkpoint
     """
@@ -200,12 +200,30 @@ def restart_from_checkpoint(ckp_path, run_variables=None, **kwargs):
     # example: {'state_dict': model}
     for key, value in kwargs.items():
         if key in checkpoint and value is not None:
+            payload = checkpoint[key]
+            if (
+                drop_key_substrings
+                and isinstance(payload, dict)
+                and all(isinstance(k, str) for k in payload.keys())
+            ):
+                original_len = len(payload)
+                payload = {
+                    k: v for k, v in payload.items()
+                    if not any(substr in k for substr in drop_key_substrings)
+                }
+                dropped = original_len - len(payload)
+                if dropped > 0:
+                    print(
+                        "=> dropped {} keys from '{}' checkpoint payload matching {}".format(
+                            dropped, key, drop_key_substrings
+                        )
+                    )
             try:
-                msg = value.load_state_dict(checkpoint[key], strict=False)
+                msg = value.load_state_dict(payload, strict=False)
                 print("=> loaded '{}' from checkpoint '{}' with msg {}".format(key, ckp_path, msg))
             except TypeError:
                 try:
-                    msg = value.load_state_dict(checkpoint[key])
+                    msg = value.load_state_dict(payload)
                     print("=> loaded '{}' from checkpoint: '{}'".format(key, ckp_path))
                 except ValueError:
                     print("=> failed to load '{}' from checkpoint: '{}'".format(key, ckp_path))

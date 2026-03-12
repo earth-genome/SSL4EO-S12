@@ -85,6 +85,22 @@ def get_args_parser():
         help='Bottleneck dimension in DINO projection head.')
     parser.add_argument('--head_use_weight_norm', default=True, type=utils.bool_flag,
         help='Use weight normalization in DINO projection head output layer.')
+    parser.add_argument('--enable_rope', default=False, type=utils.bool_flag,
+        help='Enable RoPE positional encoding in ViT attention (replaces learned absolute pos_embed).')
+    parser.add_argument('--rope_base', default=10000, type=int,
+        help='RoPE frequency base.')
+    parser.add_argument('--drop_legacy_pos_embed', default=True, type=utils.bool_flag,
+        help='Drop legacy pos_embed keys when loading old checkpoints into RoPE-enabled models.')
+    parser.add_argument('--dino_v3_mode', default='default', type=str, choices=['default', 'full'],
+        help="DINOv3 mode: 'default' keeps DINO+KoLeo, 'full' enables DINO+iBOT+Gram.")
+    parser.add_argument('--enable_ibot', default=False, type=utils.bool_flag,
+        help='Enable iBOT branch in full DINOv3 mode.')
+    parser.add_argument('--ibot_weight', default=1.0, type=float,
+        help='Weight for iBOT term in full DINOv3 mode.')
+    parser.add_argument('--gram_weight', default=0.0, type=float,
+        help='Weight for Gram anchoring term in full DINOv3 mode.')
+    parser.add_argument('--gram_teacher_checkpoint', default='', type=str,
+        help='Checkpoint used to initialize frozen Gram teacher. If empty and --resume is set, uses checkpoint.pth.')
 
     # Temperature teacher parameters
     parser.add_argument('--warmup_teacher_temp', default=0.04, type=float,
@@ -133,6 +149,9 @@ def get_args_parser():
     parser.add_argument('--optimizer', default='adamw', type=str,
         choices=['adamw', 'sgd', 'lars'], help="""Type of optimizer. We recommend using adamw with ViTs.""")
     parser.add_argument('--drop_path_rate', type=float, default=0.1, help="stochastic depth rate")
+    parser.add_argument('--schedule_mode', default='cosine', type=str,
+        choices=['cosine', 'constant_after_warmup', 'constant'],
+        help='Schedule mode for lr/wd.')
 
     # Multi-crop parameters
     parser.add_argument('--global_crops_scale', type=float, nargs='+', default=(0.4, 1.),
@@ -174,6 +193,47 @@ def get_args_parser():
     return parser
 
 
+def _build_constant_after_warmup_schedule(base_value, epochs, niter_per_ep, warmup_epochs=0, start_value=0.0):
+    warmup_iters = warmup_epochs * niter_per_ep
+    total_iters = epochs * niter_per_ep
+    if warmup_iters > 0:
+        warmup = np.linspace(start_value, base_value, warmup_iters)
+    else:
+        warmup = np.array([])
+    hold = np.ones(max(total_iters - warmup_iters, 0)) * base_value
+    return np.concatenate((warmup, hold))
+
+
+def _load_backbone_weights_for_gram(model, checkpoint_path, drop_legacy_pos_embed=False):
+    if not checkpoint_path or not os.path.isfile(checkpoint_path):
+        print(f"Gram teacher checkpoint not found: {checkpoint_path}")
+        return
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    state_dict = checkpoint
+    if isinstance(checkpoint, dict):
+        for key in ["teacher_backbone", "teacher", "student_backbone", "student", "state_dict", "model"]:
+            if key in checkpoint:
+                state_dict = checkpoint[key]
+                print(f"Gram teacher loading checkpoint key: {key}")
+                break
+
+    if not isinstance(state_dict, dict):
+        print("Gram teacher checkpoint payload is not a state dict. Skipping.")
+        return
+
+    state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    state_dict = {k.replace("backbone.", ""): v for k, v in state_dict.items()}
+    if drop_legacy_pos_embed:
+        before = len(state_dict)
+        state_dict = {k: v for k, v in state_dict.items() if "pos_embed" not in k}
+        dropped = before - len(state_dict)
+        if dropped > 0:
+            print(f"Gram teacher dropped {dropped} legacy pos_embed keys.")
+    msg = model.load_state_dict(state_dict, strict=False)
+    print(f"Gram teacher loaded with msg: {msg}")
+
+
 def train_dino(args):
     utils.init_distributed_mode(args)
     utils.fix_random_seeds(args.seed)
@@ -187,6 +247,12 @@ def train_dino(args):
     print("git:\n  {}\n".format(utils.get_sha()))
     print("\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(args)).items())))
     cudnn.benchmark = True
+    if args.dino_v3_mode == "full":
+        print("DINOv3 full mode enabled: DINO + iBOT + Gram.")
+        if not args.enable_ibot:
+            print("WARNING: full mode requested but --enable_ibot=false.")
+        if args.gram_weight <= 0:
+            print("WARNING: full mode requested but --gram_weight<=0.")
 
     
     # ============ preparing data ... ============
@@ -244,9 +310,16 @@ def train_dino(args):
         student = vits.__dict__[args.arch](
             patch_size=args.patch_size,
             drop_path_rate=args.drop_path_rate,  # stochastic depth
-            in_chans=args.n_channels
+            in_chans=args.n_channels,
+            use_rope=args.enable_rope,
+            rope_base=args.rope_base,
         )
-        teacher = vits.__dict__[args.arch](patch_size=args.patch_size, in_chans=args.n_channels)
+        teacher = vits.__dict__[args.arch](
+            patch_size=args.patch_size,
+            in_chans=args.n_channels,
+            use_rope=args.enable_rope,
+            rope_base=args.rope_base,
+        )
         embed_dim = student.embed_dim
     # otherwise, we check if the architecture is in torchvision models, [yi:need to adjust for more in_channels]
     elif args.arch in torchvision_models.__dict__.keys():
@@ -263,6 +336,9 @@ def train_dino(args):
         embed_dim = student.embed_dim
     else:
         print(f"Unknow architecture: {args.arch}")
+
+    if args.enable_rope and args.arch not in vits.__dict__.keys():
+        raise ValueError("--enable_rope currently supports ViT architectures only.")
 
     # multi-crop wrapper handles forward with inputs of different resolutions
     student = utils.MultiCropWrapper(student, DINOHead(
@@ -312,6 +388,26 @@ def train_dino(args):
     # ============ preparing loss ... ============
     dino_loss = build_dino_objective(args).cuda()
 
+    gram_teacher = None
+    if args.objective == "dino_v3" and args.dino_v3_mode == "full" and args.gram_weight > 0:
+        if args.arch not in vits.__dict__.keys():
+            raise ValueError("Gram teacher is currently implemented for ViT backbones only.")
+        gram_teacher = vits.__dict__[args.arch](
+            patch_size=args.patch_size,
+            in_chans=args.n_channels,
+            use_rope=args.enable_rope,
+            rope_base=args.rope_base,
+        ).cuda()
+        gram_teacher.eval()
+        for p in gram_teacher.parameters():
+            p.requires_grad = False
+        gram_ckpt = args.gram_teacher_checkpoint or os.path.join(args.checkpoints_dir, "checkpoint.pth")
+        _load_backbone_weights_for_gram(
+            gram_teacher,
+            gram_ckpt,
+            drop_legacy_pos_embed=(args.enable_rope and args.drop_legacy_pos_embed),
+        )
+
     # ============ preparing optimizer ... ============
     params_groups = utils.get_params_groups(student)
     if args.optimizer == "adamw":
@@ -326,17 +422,33 @@ def train_dino(args):
         fp16_scaler = torch.cuda.amp.GradScaler()
 
     # ============ init schedulers ... ============
-    lr_schedule = utils.cosine_scheduler(
-        args.lr * (args.batch_size_per_gpu * utils.get_world_size()) / 256.,  # linear scaling rule
-        args.min_lr,
-        args.epochs, len(data_loader),
-        warmup_epochs=args.warmup_epochs,
-    )
-    wd_schedule = utils.cosine_scheduler(
-        args.weight_decay,
-        args.weight_decay_end,
-        args.epochs, len(data_loader),
-    )
+    scaled_lr = args.lr * (args.batch_size_per_gpu * utils.get_world_size()) / 256.
+    if args.schedule_mode == "cosine":
+        lr_schedule = utils.cosine_scheduler(
+            scaled_lr,
+            args.min_lr,
+            args.epochs, len(data_loader),
+            warmup_epochs=args.warmup_epochs,
+        )
+        wd_schedule = utils.cosine_scheduler(
+            args.weight_decay,
+            args.weight_decay_end,
+            args.epochs, len(data_loader),
+        )
+    elif args.schedule_mode == "constant_after_warmup":
+        lr_schedule = _build_constant_after_warmup_schedule(
+            scaled_lr,
+            args.epochs,
+            len(data_loader),
+            warmup_epochs=args.warmup_epochs,
+            start_value=0.0,
+        )
+        wd_schedule = np.ones(args.epochs * len(data_loader)) * args.weight_decay
+    elif args.schedule_mode == "constant":
+        lr_schedule = np.ones(args.epochs * len(data_loader)) * scaled_lr
+        wd_schedule = np.ones(args.epochs * len(data_loader)) * args.weight_decay
+    else:
+        raise ValueError(f"Unsupported schedule mode: {args.schedule_mode}")
     # momentum parameter is increased to 1. during training with a cosine schedule
     momentum_schedule = utils.cosine_scheduler(args.momentum_teacher, 1,
                                                args.epochs, len(data_loader))
@@ -345,9 +457,14 @@ def train_dino(args):
     # ============ optionally resume training ... ============
     to_restore = {"epoch": 0}
     if args.resume:
+        drop_key_substrings = None
+        if args.enable_rope and args.drop_legacy_pos_embed:
+            drop_key_substrings = ["pos_embed"]
+            print("RoPE migration enabled: legacy pos_embed checkpoint keys will be skipped.")
         utils.restart_from_checkpoint(
             os.path.join(args.checkpoints_dir, "checkpoint.pth"),
             run_variables=to_restore,
+            drop_key_substrings=drop_key_substrings,
             student=student,
             teacher=teacher,
             optimizer=optimizer,
@@ -355,6 +472,8 @@ def train_dino(args):
             dino_loss=dino_loss,
             objective=dino_loss,
         )
+    else:
+        print("WARNING: --resume is not set; training starts from scratch.")
     start_epoch = to_restore["epoch"]
 
     start_time = time.time()
@@ -366,7 +485,7 @@ def train_dino(args):
         # ============ training one epoch of DINO ... ============
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
             data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
-            epoch, fp16_scaler, args)
+            epoch, fp16_scaler, args, gram_teacher=gram_teacher)
 
         # ============ writing logs ... ============
         save_dict = {
@@ -398,7 +517,7 @@ def train_dino(args):
 
 def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
                     optimizer, lr_schedule, wd_schedule, momentum_schedule,epoch,
-                    fp16_scaler, args):
+                    fp16_scaler, args, gram_teacher=None):
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     for it, images in enumerate(metric_logger.log_every(data_loader, 10, header)):
@@ -415,10 +534,23 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         # move images to gpu
         images = [im.cuda(non_blocking=True) for im in images]
         # teacher and student forward passes + compute dino loss
+        student_feats = None
+        gram_teacher_feats = None
         with torch.cuda.amp.autocast(fp16_scaler is not None):
             teacher_output = teacher(images[:2])  # only the 2 global views pass through the teacher
             student_output = student(images)
-            loss, loss_terms = dino_loss(student_output, teacher_output, epoch)
+            if args.objective == "dino_v3" and args.dino_v3_mode == "full" and args.gram_weight > 0 and gram_teacher is not None:
+                global_views = torch.cat(images[:2], dim=0)
+                student_feats = student.module.backbone(global_views)
+                with torch.no_grad():
+                    gram_teacher_feats = gram_teacher(global_views)
+            loss, loss_terms = dino_loss(
+                student_output,
+                teacher_output,
+                epoch,
+                student_feats=student_feats,
+                gram_teacher_feats=gram_teacher_feats,
+            )
 
         if not math.isfinite(loss.item()):
             print("Loss is {}, stopping training".format(loss.item()), force=True)
@@ -455,6 +587,8 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         metric_logger.update(loss=loss.item())
         metric_logger.update(dino=loss_terms["dino_loss"].item())
         metric_logger.update(koleo=loss_terms["koleo_loss"].item())
+        metric_logger.update(ibot=loss_terms["ibot_loss"].item())
+        metric_logger.update(gram=loss_terms["gram_loss"].item())
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(wd=optimizer.param_groups[0]["weight_decay"])
     # gather the stats from all processes
