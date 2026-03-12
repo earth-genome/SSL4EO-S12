@@ -38,7 +38,7 @@ from models.dino.objectives import build_dino_objective
 
 
 from datasets.SSL4EO.ssl4eo_dataset_lmdb import LMDBDataset
-from cvtorchvision import cvtransforms
+from models import cv_transforms as cvtransforms
 from models.rs_transforms_uint8 import RandomChannelDrop, GaussianBlur, Solarize, RandomBrightness, RandomContrast, ToGray, RandomSensorDrop_S1S2
 ### end of change ###
 import pdb
