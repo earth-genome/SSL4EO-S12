@@ -10,7 +10,7 @@ PRETRAIN_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # -------------------------------
 # User-overridable settings
 # -------------------------------
-NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 MASTER_PORT="${MASTER_PORT:-29501}"
 
 DATA_PATH="${DATA_PATH:-./data/ssl4eo_250k_s2c_uint8.lmdb}"
@@ -18,7 +18,7 @@ CHECKPOINTS_DIR="${CHECKPOINTS_DIR:-./checkpoints/dino_v3_restart_vits16}"
 
 EPOCHS="${EPOCHS:-100}"
 BATCH_SIZE_PER_GPU="${BATCH_SIZE_PER_GPU:-64}"
-NUM_WORKERS="${NUM_WORKERS:-8}"
+NUM_WORKERS="${NUM_WORKERS:-10}"
 LR="${LR:-1.5e-4}"
 WARMUP_EPOCHS="${WARMUP_EPOCHS:-10}"
 IN_SIZE="${IN_SIZE:-224}"
