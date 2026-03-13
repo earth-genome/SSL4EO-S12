@@ -209,7 +209,7 @@ def _load_backbone_weights_for_gram(model, checkpoint_path, drop_legacy_pos_embe
         print(f"Gram teacher checkpoint not found: {checkpoint_path}")
         return
 
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state_dict = checkpoint
     if isinstance(checkpoint, dict):
         for key in ["teacher_backbone", "teacher", "student_backbone", "student", "state_dict", "model"]:

@@ -91,7 +91,7 @@ class Solarization(object):
 
 def load_pretrained_weights(model, pretrained_weights, checkpoint_key, model_name, patch_size):
     if os.path.isfile(pretrained_weights):
-        checkpoint = torch.load(pretrained_weights, map_location="cpu")
+        checkpoint = torch.load(pretrained_weights, map_location="cpu", weights_only=False)
         state_dict = checkpoint
         if checkpoint_key is not None and checkpoint_key in checkpoint:
             print(f"Take key {checkpoint_key} in provided checkpoint dict")
@@ -193,7 +193,7 @@ def restart_from_checkpoint(ckp_path, run_variables=None, **kwargs):
     print("Found checkpoint at {}".format(ckp_path))
 
     # open checkpoint file
-    checkpoint = torch.load(ckp_path, map_location="cpu")
+    checkpoint = torch.load(ckp_path, map_location="cpu", weights_only=False)
 
     # key is what to look for in the checkpoint file
     # value is the object to load
