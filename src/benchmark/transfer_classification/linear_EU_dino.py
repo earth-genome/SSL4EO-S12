@@ -53,7 +53,8 @@ def eval_linear(args):
     # ============ building network ... ============
     # if the network is a Vision Transformer (i.e. vit_tiny, vit_small, vit_base)
     if args.arch in vits.__dict__.keys():
-        model = vits.__dict__[args.arch](patch_size=args.patch_size, num_classes=0, in_chans=13)
+        model = vits.__dict__[args.arch](patch_size=args.patch_size, num_classes=0, in_chans=13,
+                                         use_rope=getattr(args, 'use_rope', False))
         embed_dim = model.embed_dim * (args.n_last_blocks + int(args.avgpool_patchtokens))
     # otherwise, we check if the architecture is in torchvision models
     elif args.arch in torchvision_models.__dict__.keys():
@@ -341,7 +342,9 @@ if __name__ == '__main__':
     parser.add_argument("--resume", action='store_true', help="resume from checkpoint")
     parser.add_argument("--train_frac", default=1.0, type=float, help="use a subset of labeled data")
     parser.add_argument("--seed",default=42,type=int)
-    parser.add_argument("--normalize",action="store_true",default=None)    
+    parser.add_argument("--normalize",action="store_true",default=None)
+    parser.add_argument("--use_rope", action="store_true", default=False,
+        help="Use RoPE positional encoding (must match pretrained checkpoint).")
     
     args = parser.parse_args()
 

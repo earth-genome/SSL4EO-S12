@@ -24,6 +24,43 @@ import torch.nn as nn
 from models.dino.utils import trunc_normal_
 
 
+def _rotate_half(x):
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+    return torch.stack((-x2, x1), dim=-1).reshape_as(x)
+
+
+def _build_2d_rope_cache(num_tokens, head_dim, device, dtype, base=10000):
+    if head_dim % 4 != 0:
+        raise ValueError(f"RoPE requires head_dim divisible by 4, got {head_dim}")
+    side = int(math.sqrt(num_tokens))
+    if side * side != num_tokens:
+        raise ValueError(f"RoPE expects square patch grids, got {num_tokens} tokens")
+
+    y, x = torch.meshgrid(
+        torch.arange(side, device=device),
+        torch.arange(side, device=device),
+        indexing="ij",
+    )
+    y = y.reshape(-1).float()
+    x = x.reshape(-1).float()
+
+    quarter_dim = head_dim // 4
+    inv_freq = 1.0 / (base ** (torch.arange(quarter_dim, device=device).float() / quarter_dim))
+    freqs_y = torch.outer(y, inv_freq)
+    freqs_x = torch.outer(x, inv_freq)
+    freqs = torch.cat([freqs_y, freqs_x], dim=-1)
+    freqs = freqs.to(dtype=dtype)
+    emb = torch.repeat_interleave(freqs, repeats=2, dim=-1)
+    return emb.cos(), emb.sin()
+
+
+def _apply_rope_patch_tokens(x, cos, sin):
+    cos = cos.unsqueeze(0).unsqueeze(0)
+    sin = sin.unsqueeze(0).unsqueeze(0)
+    return (x * cos) + (_rotate_half(x) * sin)
+
+
 def drop_path(x, drop_prob: float = 0., training: bool = False):
     if drop_prob == 0. or not training:
         return x
@@ -66,11 +103,14 @@ class Mlp(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.,
+                 use_rope=False, rope_base=10000):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim ** -0.5
+        self.use_rope = use_rope
+        self.rope_base = rope_base
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
@@ -81,6 +121,16 @@ class Attention(nn.Module):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
+
+        if self.use_rope and N > 1:
+            n_patch = N - 1
+            cos, sin = _build_2d_rope_cache(
+                n_patch, q.shape[-1], q.device, q.dtype, base=self.rope_base,
+            )
+            q_cls, q_patch = q[:, :, :1, :], q[:, :, 1:, :]
+            k_cls, k_patch = k[:, :, :1, :], k[:, :, 1:, :]
+            q = torch.cat([q_cls, _apply_rope_patch_tokens(q_patch, cos, sin)], dim=2)
+            k = torch.cat([k_cls, _apply_rope_patch_tokens(k_patch, cos, sin)], dim=2)
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
@@ -94,11 +144,12 @@ class Attention(nn.Module):
 
 class Block(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, use_rope=False, rope_base=10000):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
+            use_rope=use_rope, rope_base=rope_base)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -135,30 +186,33 @@ class VisionTransformer(nn.Module):
     """ Vision Transformer """
     def __init__(self, img_size=[224], patch_size=16, in_chans=3, num_classes=0, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
-                 drop_path_rate=0., norm_layer=nn.LayerNorm, **kwargs):
+                 drop_path_rate=0., norm_layer=nn.LayerNorm, use_rope=False, rope_base=10000, **kwargs):
         super().__init__()
         self.num_features = self.embed_dim = embed_dim
+        self.use_rope = use_rope
 
         self.patch_embed = PatchEmbed(
             img_size=img_size[0], patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+        self.pos_embed = None if self.use_rope else nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
         self.pos_drop = nn.Dropout(p=drop_rate)
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.ModuleList([
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer)
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
+                use_rope=self.use_rope, rope_base=rope_base)
             for i in range(depth)])
         self.norm = norm_layer(embed_dim)
 
         # Classifier head
         self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-        trunc_normal_(self.pos_embed, std=.02)
+        if self.pos_embed is not None:
+            trunc_normal_(self.pos_embed, std=.02)
         trunc_normal_(self.cls_token, std=.02)
         self.apply(self._init_weights)
 
@@ -172,6 +226,8 @@ class VisionTransformer(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def interpolate_pos_encoding(self, x, w, h):
+        if self.pos_embed is None:
+            return None
         npatch = x.shape[1] - 1
         N = self.pos_embed.shape[1] - 1
         if npatch == N and w == h:
@@ -201,8 +257,10 @@ class VisionTransformer(nn.Module):
         cls_tokens = self.cls_token.expand(B, -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
 
-        # add positional encoding to each token
-        x = x + self.interpolate_pos_encoding(x, w, h)
+        # add positional encoding to each token (skipped when using RoPE)
+        pos_embed = self.interpolate_pos_encoding(x, w, h)
+        if pos_embed is not None:
+            x = x + pos_embed
 
         return self.pos_drop(x)
 
