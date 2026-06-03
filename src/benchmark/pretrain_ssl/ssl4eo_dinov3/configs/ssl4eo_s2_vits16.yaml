@@ -1,0 +1,130 @@
+# DINOv3 from-scratch pretraining on 12-band Sentinel-2 (SSL4EO-S12, s2c L1C).
+#
+# This file is an OVERLAY on dinov3/configs/ssl_default_config.yaml (the upstream
+# loader merges: default <- this <- CLI opts). Only fields that differ from the
+# defaults are set here.
+#
+# Objective: DINO (global self-distillation) + iBOT (masked patch) + KoLeo, with
+# register tokens (n_storage_tokens), RoPE position embeddings (default), and a
+# SwiGLU FFN. Gram anchoring is left OFF here; enable it via the stage-2 overlay
+# (ssl4eo_s2_vits16_gram.yaml) once base pretraining is stable.
+#
+# Apples-to-apples target: match/beat the original DINO ViT-S/16 SSL4EO baseline
+# (BigEarthNet 90.5%, EuroSAT 99.0%, So2Sat 62.2%).
+
+MODEL:
+  META_ARCHITECTURE: SSLMetaArch
+  DEVICE: cuda
+  WEIGHTS: ''
+  DTYPE: float32
+
+compute_precision:
+  param_dtype: bf16        # bf16 autocast on A100/H100 (replaces fp16 GradScaler)
+  reduce_dtype: fp32
+  sharding_strategy: SHARD_GRAD_OP
+
+student:
+  arch: vit_small          # ViT-S/16: embed_dim 384, depth 12, heads 6
+  patch_size: 16
+  in_chans: 12             # <-- 12-band S2 L2A-compatible input (B10 dropped)
+  drop_path_rate: 0.1
+  layerscale: 1.0e-05
+  ffn_layer: swiglu        # SwiGLU FFN (set to "mlp" for the conservative recipe)
+  ffn_ratio: 4.0
+  n_storage_tokens: 4      # register tokens -> removes attention artifacts
+  norm_layer: layernorm
+  pos_embed_type: rope     # Rotary position embeddings (resolution-flexible)
+  pos_embed_rope_base: 100.0
+  pos_embed_rope_normalize_coords: separate
+  pos_embed_rope_dtype: bf16
+  qkv_bias: true
+  proj_bias: true
+  ffn_bias: true
+  mask_k_bias: false
+  untie_cls_and_patch_norms: false
+  untie_global_and_local_cls_norm: false
+  fp8_enabled: false       # set true on H100 for fp8 matmuls (see perf notes)
+  fp8_filter: blocks
+
+teacher:
+  in_chans: 12
+  momentum_teacher: 0.992
+  final_momentum_teacher: 1.0
+  warmup_teacher_temp: 0.04
+  teacher_temp: 0.07
+  warmup_teacher_temp_epochs: 30
+
+dino:
+  loss_weight: 1.0
+  head_n_prototypes: 65536
+  head_bottleneck_dim: 256
+  head_hidden_dim: 2048
+  head_nlayers: 3
+  head_norm_last_layer: false
+  koleo_loss_weight: 0.1
+
+ibot:
+  loss_weight: 1.0
+  mask_sample_probability: 0.5
+  mask_ratio_min_max: [0.1, 0.5]
+  separate_head: true
+  head_n_prototypes: 65536
+  head_bottleneck_dim: 256
+  head_hidden_dim: 2048
+  head_nlayers: 3
+
+crops:
+  global_crops_scale: [0.32, 1.0]
+  local_crops_scale: [0.05, 0.32]
+  local_crops_number: 8
+  global_crops_size: 224
+  local_crops_size: 96
+  horizontal_flips: true
+  share_color_jitter: false
+  # Per-crop season sampling for the SSL4EO season stack (custom key handled by
+  # the multispectral augmentation): "augment" | "random" | "fixed".
+  season: augment
+  # --- 12-band normalization statistics (uint8 LMDB scaled to [0,1]) ---------
+  # Defaults below standardize the 2-sigma uint8 encoding to ~[-1, 1].
+  # Recompute exact per-band stats with scripts/compute_band_stats.py and paste.
+  rgb_mean: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+  rgb_std:  [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25]
+
+train:
+  # Override root on the CLI: train.dataset_path=SSL4EOS2:root=/data/<lmdb>
+  dataset_path: SSL4EOS2:root=/data/ssl4eo_s2c_uint8.lmdb
+  batch_size_per_gpu: 64
+  num_workers: 10
+  centering: sinkhorn_knopp
+  compile: true
+  cache_dataset: false
+  # OFFICIAL_EPOCH_LENGTH = ceil(250000 / (batch_size_per_gpu * num_gpus)).
+  # Default below assumes 8 GPUs * 64 = 512 global batch -> ~488 iters/epoch.
+  # IMPORTANT: adjust for your GPU count (the launcher script computes this).
+  OFFICIAL_EPOCH_LENGTH: 488
+  seed: 0
+
+optim:
+  epochs: 100
+  optimizer: adamw
+  lr: 1.0e-03
+  min_lr: 1.0e-06
+  warmup_epochs: 10
+  weight_decay: 0.04
+  weight_decay_end: 0.4
+  clip_grad: 3.0
+  freeze_last_layer_epochs: 1
+  scaling_rule: sqrt_wrt_1024
+  patch_embed_lr_mult: 0.2
+  layerwise_decay: 0.9
+  multi_tensor_optim: true
+
+gram:
+  use_loss: false          # stage-1: no Gram anchoring (see *_gram.yaml)
+
+evaluation:
+  eval_period_iterations: 0  # in-loop eval disabled; certify offline (see eval/)
+
+checkpointing:
+  period: 2500
+  max_to_keep: 3

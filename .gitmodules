@@ -1,0 +1,3 @@
+[submodule "src/benchmark/pretrain_ssl/dinov3"]
+	path = src/benchmark/pretrain_ssl/dinov3
+	url = https://github.com/facebookresearch/dinov3

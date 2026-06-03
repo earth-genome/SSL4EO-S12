@@ -1,0 +1,129 @@
+# DINOv3 STAGE-2 Gram-anchoring overlay for 12-band Sentinel-2 (ViT-S/16).
+#
+# Standalone config (the upstream loader merges a single file on top of the
+# defaults, so this duplicates the stage-1 settings and adds Gram anchoring).
+# Run this AFTER stage-1 completes, initializing from the stage-1 teacher to
+# sharpen dense/patch features. Set MODEL.WEIGHTS to your stage-1 teacher .pth
+# and train.dataset_path on the CLI.
+#
+# Gram anchoring regularizes the student's patch-feature Gram matrix toward a
+# frozen "Gram teacher" (a snapshot of the EMA teacher), the main DINOv3 trick
+# for high-quality dense features.
+
+MODEL:
+  META_ARCHITECTURE: SSLMetaArch
+  DEVICE: cuda
+  WEIGHTS: ''            # <-- set to stage-1 teacher checkpoint (.pth) on the CLI
+  DTYPE: float32
+
+compute_precision:
+  param_dtype: bf16
+  reduce_dtype: fp32
+  sharding_strategy: SHARD_GRAD_OP
+
+student:
+  arch: vit_small
+  patch_size: 16
+  in_chans: 12
+  drop_path_rate: 0.1
+  layerscale: 1.0e-05
+  ffn_layer: swiglu
+  ffn_ratio: 4.0
+  n_storage_tokens: 4
+  norm_layer: layernorm
+  pos_embed_type: rope
+  pos_embed_rope_base: 100.0
+  pos_embed_rope_normalize_coords: separate
+  pos_embed_rope_dtype: bf16
+
+teacher:
+  in_chans: 12
+  momentum_teacher: 0.994
+  final_momentum_teacher: 1.0
+  warmup_teacher_temp: 0.07     # no temp warmup on continuation
+  teacher_temp: 0.07
+  warmup_teacher_temp_epochs: 0
+
+dino:
+  loss_weight: 1.0
+  head_n_prototypes: 65536
+  head_bottleneck_dim: 256
+  head_hidden_dim: 2048
+  head_nlayers: 3
+  koleo_loss_weight: 0.1
+
+ibot:
+  loss_weight: 1.0
+  mask_sample_probability: 0.5
+  mask_ratio_min_max: [0.1, 0.5]
+  separate_head: true
+  head_n_prototypes: 65536
+  head_bottleneck_dim: 256
+  head_hidden_dim: 2048
+  head_nlayers: 3
+
+gram:
+  use_loss: true
+  loss_weight: 1.0
+  ema_teacher: false
+  ckpt: ''                # optional explicit Gram-teacher ckpt; '' => use EMA snapshot
+  rep_update: true
+  update_frequency: 5000  # refresh the Gram teacher from the EMA teacher
+  it_first_update: 0
+  max_updates: 3
+  normalized: true
+  img_level: true
+  tokens_used: all
+  global_teacher_resize_method: bicubic
+  loss_weight_schedule:
+    start: 0.0
+    peak: 0.0
+    end: 2.0
+    warmup_epochs: 0
+    cosine_epochs: 1
+
+crops:
+  global_crops_scale: [0.32, 1.0]
+  local_crops_scale: [0.05, 0.32]
+  local_crops_number: 8
+  global_crops_size: 224
+  local_crops_size: 96
+  gram_teacher_crops_size: 256     # higher-res crops feed the Gram teacher
+  gram_teacher_no_distortions: true
+  horizontal_flips: true
+  share_color_jitter: false
+  season: augment
+  rgb_mean: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+  rgb_std:  [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25]
+
+train:
+  dataset_path: SSL4EOS2:root=/data/ssl4eo_s2c_uint8.lmdb
+  batch_size_per_gpu: 32           # higher-res gram crops -> smaller batch
+  num_workers: 10
+  centering: sinkhorn_knopp
+  compile: true
+  cache_dataset: false
+  OFFICIAL_EPOCH_LENGTH: 488
+  seed: 0
+
+optim:
+  epochs: 20                       # short continuation
+  optimizer: adamw
+  lr: 2.0e-04
+  min_lr: 1.0e-06
+  warmup_epochs: 1
+  weight_decay: 0.04
+  weight_decay_end: 0.2
+  clip_grad: 3.0
+  freeze_last_layer_epochs: 0
+  scaling_rule: sqrt_wrt_1024
+  patch_embed_lr_mult: 0.2
+  layerwise_decay: 0.9
+  multi_tensor_optim: true
+
+evaluation:
+  eval_period_iterations: 0
+
+checkpointing:
+  period: 2500
+  max_to_keep: 3

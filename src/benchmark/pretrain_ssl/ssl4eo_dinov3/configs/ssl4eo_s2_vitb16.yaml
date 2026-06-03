@@ -1,0 +1,103 @@
+# DINOv3 from-scratch pretraining on 12-band Sentinel-2 — ViT-B/16 variant.
+# Same recipe as ssl4eo_s2_vits16.yaml but a larger backbone for the final run
+# if the GCP budget allows. FSDP2 (SHARD_GRAD_OP) handles the extra parameters.
+
+MODEL:
+  META_ARCHITECTURE: SSLMetaArch
+  DEVICE: cuda
+  WEIGHTS: ''
+  DTYPE: float32
+
+compute_precision:
+  param_dtype: bf16
+  reduce_dtype: fp32
+  sharding_strategy: SHARD_GRAD_OP
+
+student:
+  arch: vit_base           # ViT-B/16: embed_dim 768, depth 12, heads 12
+  patch_size: 16
+  in_chans: 12
+  drop_path_rate: 0.1
+  layerscale: 1.0e-05
+  ffn_layer: swiglu
+  ffn_ratio: 4.0
+  n_storage_tokens: 4
+  norm_layer: layernorm
+  pos_embed_type: rope
+  pos_embed_rope_base: 100.0
+  pos_embed_rope_normalize_coords: separate
+  pos_embed_rope_dtype: bf16
+  fp8_enabled: false
+
+teacher:
+  in_chans: 12
+  momentum_teacher: 0.992
+  final_momentum_teacher: 1.0
+  warmup_teacher_temp: 0.04
+  teacher_temp: 0.07
+  warmup_teacher_temp_epochs: 30
+
+dino:
+  loss_weight: 1.0
+  head_n_prototypes: 65536
+  head_bottleneck_dim: 256
+  head_hidden_dim: 2048
+  head_nlayers: 3
+  koleo_loss_weight: 0.1
+
+ibot:
+  loss_weight: 1.0
+  mask_sample_probability: 0.5
+  mask_ratio_min_max: [0.1, 0.5]
+  separate_head: true
+  head_n_prototypes: 65536
+  head_bottleneck_dim: 256
+  head_hidden_dim: 2048
+  head_nlayers: 3
+
+crops:
+  global_crops_scale: [0.32, 1.0]
+  local_crops_scale: [0.05, 0.32]
+  local_crops_number: 8
+  global_crops_size: 224
+  local_crops_size: 96
+  horizontal_flips: true
+  share_color_jitter: false
+  season: augment
+  rgb_mean: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+  rgb_std:  [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25]
+
+train:
+  dataset_path: SSL4EOS2:root=/data/ssl4eo_s2c_uint8.lmdb
+  batch_size_per_gpu: 48
+  num_workers: 10
+  centering: sinkhorn_knopp
+  compile: true
+  cache_dataset: false
+  OFFICIAL_EPOCH_LENGTH: 651    # ceil(250000 / (48 * 8))
+  seed: 0
+
+optim:
+  epochs: 100
+  optimizer: adamw
+  lr: 1.0e-03
+  min_lr: 1.0e-06
+  warmup_epochs: 10
+  weight_decay: 0.04
+  weight_decay_end: 0.4
+  clip_grad: 3.0
+  freeze_last_layer_epochs: 1
+  scaling_rule: sqrt_wrt_1024
+  patch_embed_lr_mult: 0.2
+  layerwise_decay: 0.9
+  multi_tensor_optim: true
+
+gram:
+  use_loss: false
+
+evaluation:
+  eval_period_iterations: 0
+
+checkpointing:
+  period: 2500
+  max_to_keep: 3

@@ -1,0 +1,12 @@
+# Extra Python deps for the SSL4EO-S12 x DINOv3 pipeline on top of a PyTorch
+# >= 2.7.1 base image (torch/torchvision come from the base image / conda).
+# DINOv3's own deps are in ../dinov3/requirements.txt (installed via -e).
+lmdb
+numpy
+omegaconf
+scikit-learn
+tensorboard
+wandb
+google-cloud-storage
+rasterio        # optional: only needed by extract_embeddings.py for GeoTIFFs
+tqdm

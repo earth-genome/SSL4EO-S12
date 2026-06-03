@@ -32,6 +32,34 @@ The pre-trained models with different SSL methods are provided as follows (13 ba
 
 \* Note the results for BigEarthNet are based on the train/val split following [SeCo](https://github.com/ServiceNow/seasonal-contrast/blob/8285173ec205b64bc3e53b880344dd6c3f79fa7a/datasets/bigearthnet_dataset.py#L119) and [In-domain representation learning for RS](https://github.com/google-research/google-research/tree/master/remote_sensing_representations).
 
+### 🦖 DINOv3 upgrade (12-band, L2A-compatible)
+
+A modernized pretraining path re-implements the model with the **official
+[DINOv3](https://github.com/facebookresearch/dinov3)** objective (DINO + iBOT +
+KoLeo, register tokens, RoPE, SwiGLU, optional Gram anchoring), trained from
+scratch on **12 bands** (Sentinel-2 **L2A**-compatible: B10 cirrus dropped to
+match production inference) with a modern stack (bf16, `torch.compile`, TF32,
+FlashAttention/SDPA, FSDP2, optional fp8 on H100).
+
+See **[`src/benchmark/pretrain_ssl/ssl4eo_dinov3/`](src/benchmark/pretrain_ssl/ssl4eo_dinov3/README.md)**
+for setup, prototype/full-run launch scripts, the certification harness (gated
+against the DINO ViT-S/16 baselines above), embedding extraction, and the
+Dockerfile for GCP. DINOv3 itself is a pinned git submodule at
+`src/benchmark/pretrain_ssl/dinov3`:
+```bash
+git submodule update --init src/benchmark/pretrain_ssl/dinov3
+```
+
+> **Built with DINOv3.** Models trained with that code are derivatives governed
+> by the [DINOv3 License](src/benchmark/pretrain_ssl/dinov3/LICENSE.md)
+> (commercial use OK; requires a "Built with DINOv3" notice and shipping the
+> license). The rest of this repository remains Apache-2.0.
+
+| SSL method | Arch | Input | Status | Pipeline |
+|:----------:|:----:|:-----:|:------:|:--------:|
+| DINOv3 (DINO+iBOT+KoLeo+Gram) | ViT-S/16 | S2 **12 bands** (L2A) | training recipe ready | [`ssl4eo_dinov3`](src/benchmark/pretrain_ssl/ssl4eo_dinov3/README.md) |
+| DINOv3 | ViT-B/16 | S2 **12 bands** (L2A) | optional larger run | [`ssl4eo_dinov3`](src/benchmark/pretrain_ssl/ssl4eo_dinov3/README.md) |
+
 Other pre-trained models:
 
 | SSL method |   Arch   | Input |                                                           Download                                                           |          |      |

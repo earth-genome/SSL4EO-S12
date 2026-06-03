@@ -49,13 +49,13 @@ def eval_linear(args):
     # ============ building network ... ============
     # if the network is a Vision Transformer (i.e. vit_tiny, vit_small, vit_base)
     if args.arch in vits.__dict__.keys():
-        model = vits.__dict__[args.arch](patch_size=args.patch_size, num_classes=0, in_chans=13)
+        model = vits.__dict__[args.arch](patch_size=args.patch_size, num_classes=0, in_chans=args.in_channels)
         embed_dim = model.embed_dim * (args.n_last_blocks + int(args.avgpool_patchtokens))
     # otherwise, we check if the architecture is in torchvision models
     elif args.arch in torchvision_models.__dict__.keys():
         model = torchvision_models.__dict__[args.arch]()
         embed_dim = model.fc.weight.shape[1]
-        model.conv1 = torch.nn.Conv2d(13, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+        model.conv1 = torch.nn.Conv2d(args.in_channels, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
         model.fc = nn.Identity()
         #model.fc = torch.nn.Linear(2048,19)
     # if the network is a XCiT
@@ -317,6 +317,9 @@ if __name__ == '__main__':
         help="""Whether ot not to concatenate the global average pooled features to the [CLS] token.
         We typically set this to False for ViT-Small and to True with ViT-Base.""")
     parser.add_argument('--arch', default='vit_small', type=str, help='Architecture')
+    parser.add_argument('--in_channels', default=13, type=int,
+                        help='Number of input bands. Use 12 for the L2A-compatible (B10-dropped) DINOv3 model; '
+                             'note DINOv3 checkpoints require eval/linear_probe_dinov3.py, not this DINOv1 harness.')
     parser.add_argument('--patch_size', default=16, type=int, help='Patch resolution of the model.')
     parser.add_argument('--pretrained', default='', type=str, help="Path to pretrained weights to evaluate.")
     parser.add_argument("--checkpoint_key", default="teacher", type=str, help='Key to use in the checkpoint (example: "teacher")')
