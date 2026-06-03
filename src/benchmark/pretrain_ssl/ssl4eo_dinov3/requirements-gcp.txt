@@ -8,5 +8,6 @@ scikit-learn
 tensorboard
 wandb
 google-cloud-storage
-rasterio        # optional: only needed by extract_embeddings.py for GeoTIFFs
+rasterio        # extract_embeddings.py (GeoTIFFs) + build_lmdb.py (raw SSL4EO tiles)
+opencv-python-headless  # build_lmdb.py: SSL4EO raw reader resizes bands via cv2
 tqdm
