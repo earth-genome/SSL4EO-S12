@@ -82,7 +82,32 @@ def _parse_args(argv=None) -> argparse.Namespace:
                         "use ~2200 for an int16 250k LMDB.")
     p.add_argument("--overwrite", action="store_true",
                    help="Allow writing into an existing --out path.")
+    p.add_argument("--skip-errors", action="store_true",
+                   help="Skip patches whose GeoTIFFs fail to read (e.g. truncated/"
+                        "corrupt tiles) instead of aborting. Skipped patch ids are "
+                        "logged to <out>.bad_patches.txt; LMDB keys stay contiguous.")
     return p.parse_args(argv)
+
+
+class _SafeDataset:
+    """Wrap a dataset so a per-item read error yields ``None`` instead of killing
+    the DataLoader worker. Used by ``--skip-errors`` to tolerate the handful of
+    truncated/corrupt GeoTIFFs in the HF export. Returns ``(None, patch_id)`` on
+    failure so the writer can log which patch was dropped."""
+
+    def __init__(self, base, patch_ids):
+        self._base = base
+        self._patch_ids = patch_ids
+
+    def __len__(self):
+        return len(self._base)
+
+    def __getitem__(self, index):
+        try:
+            return self._base[index], None
+        except Exception as exc:  # rasterio.RasterioIOError, OSError, ...
+            pid = self._patch_ids[index] if index < len(self._patch_ids) else str(index)
+            return None, (pid, f"{type(exc).__name__}: {exc}")
 
 
 def main(argv=None) -> int:
@@ -105,17 +130,24 @@ def main(argv=None) -> int:
         raise SystemExit(f"[build_lmdb] refusing to overwrite existing path: {args.out} "
                          f"(pass --overwrite to allow).")
 
-    ds = SSL4EO(root=args.root, normalize=args.normalize, mode=[args.mode], dtype=args.dtype)
-    n_total = len(ds)
+    base = SSL4EO(root=args.root, normalize=args.normalize, mode=[args.mode], dtype=args.dtype)
+    patch_ids = list(base.ids)
+    n_total = len(base)
+    ds = base
     if args.limit is not None:
         n = min(args.limit, n_total)
         ds = Subset(ds, list(range(n)))
     else:
         n = n_total
+    if args.skip_errors:
+        # patch_ids[index] resolves correctly for both the full set and the
+        # range(n) Subset, since the Subset is a contiguous prefix.
+        ds = _SafeDataset(ds, patch_ids)
 
     enc = "2sigma-uint8" if args.normalize else args.dtype
     print(f"[build_lmdb] root={args.root} mode={args.mode} encoding={enc} "
-          f"samples={n}/{n_total} workers={args.num_workers} -> {args.out}")
+          f"samples={n}/{n_total} workers={args.num_workers} "
+          f"skip_errors={args.skip_errors} -> {args.out}")
 
     map_size = int(args.map_size_gb * (1024 ** 3))
     env = lmdb.open(args.out, map_size=map_size)
@@ -123,22 +155,38 @@ def main(argv=None) -> int:
     loader = DataLoader(ds, batch_size=1, num_workers=args.num_workers,
                         collate_fn=lambda batch: batch[0])
 
+    bad = []
     txn = env.begin(write=True)
     written = 0
-    for index, sample_tuple in enumerate(tqdm(loader, total=n, desc="Creating LMDB")):
+    for index, item in enumerate(tqdm(loader, total=n, desc="Creating LMDB")):
+        if args.skip_errors:
+            sample_tuple, err = item
+            if sample_tuple is None:
+                bad.append(err)
+                continue
+        else:
+            sample_tuple = item
         s1, s2a, s2c = sample_tuple
         sample = {"s1": s1, "s2a": s2a, "s2c": s2c}[args.mode]
         sample = np.ascontiguousarray(np.asarray(sample))
         obj = (sample.tobytes(), sample.shape)
-        txn.put(str(index).encode(), pickle.dumps(obj))
+        # Key by the running written-count so keys stay contiguous (0..N-1) even
+        # when patches are skipped -- SSL4EOS2Dataset reads keys str(0..len-1).
+        txn.put(str(written).encode(), pickle.dumps(obj))
         written += 1
-        if index % 1000 == 0:
+        if written % 1000 == 0:
             txn.commit()
             txn = env.begin(write=True)
     txn.commit()
     env.sync()
     env.close()
 
+    if bad:
+        bad_path = args.out + ".bad_patches.txt"
+        with open(bad_path, "w") as fh:
+            for pid, msg in bad:
+                fh.write(f"{pid}\t{msg}\n")
+        print(f"[build_lmdb] skipped {len(bad)} unreadable patch(es); logged to {bad_path}")
     print(f"[build_lmdb] done: wrote {written} samples to {args.out}")
     print("[build_lmdb] next: recompute per-band stats and paste into the config:")
     print(f"  python ssl4eo_dinov3/scripts/compute_band_stats.py --lmdb {args.out} --samples 20000")

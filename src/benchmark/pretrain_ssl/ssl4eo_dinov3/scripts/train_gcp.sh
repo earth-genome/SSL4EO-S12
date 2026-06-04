@@ -22,6 +22,11 @@ PKG_DIR="$(dirname "$HERE")"             # ssl4eo_dinov3/
 PRETRAIN_SSL_DIR="$(dirname "$PKG_DIR")" # pretrain_ssl/
 CONFIG_PATH="$([[ "$CONFIG" = /* ]] && echo "$CONFIG" || echo "$PKG_DIR/$CONFIG")"
 
+# Resolve torchrun from the uv venv created by gcp_setup.sh, falling back to PATH.
+DATA_DIR="${DATA_DIR:-/data}"
+VENV_DIR="${VENV_DIR:-$DATA_DIR/venv}"
+TORCHRUN="$([[ -x "$VENV_DIR/bin/torchrun" ]] && echo "$VENV_DIR/bin/torchrun" || echo "torchrun")"
+
 # Resolve dataset size and GPU count to size one "epoch".
 DATASET_SIZE="${DATASET_SIZE:-250000}"
 NUM_GPUS="${NUM_GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}"
@@ -40,7 +45,7 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 # TF32 is also set inside dinov3/train/train.py; harmless to reaffirm here.
 export NVIDIA_TF32_OVERRIDE="${NVIDIA_TF32_OVERRIDE:-1}"
 
-torchrun \
+"$TORCHRUN" \
   --nproc_per_node="$NUM_GPUS" \
   --master_port="${MASTER_PORT:-29500}" \
   "$PKG_DIR/train_ssl4eo.py" \

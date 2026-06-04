@@ -100,6 +100,10 @@ bash ssl4eo_dinov3/scripts/train_gcp.sh /data/ssl4eo_s2c_uint8.lmdb /out/vits16_
 ```
 H100 fp8: add `student.fp8_enabled=true` to the launch command.
 
+> **Slow run / GPUs idling?** Training is I/O-bound on the LMDB, not compute-bound.
+> See [PERFORMANCE.md](PERFORMANCE.md) for diagnosis commands and the readahead fix
+> (a 2-line change that took a 2× A100 run from ~3 days to ~1 day).
+
 ## 4. Certify quality vs the old DINO (gate the run)
 
 Export each benchmark's train/val tiles to `.npy` (12- or 13-band; B10 auto-dropped)

@@ -16,9 +16,14 @@ PRETRAIN_SSL_DIR="$(dirname "$PKG_DIR")"
 
 export PYTHONPATH="$PRETRAIN_SSL_DIR:${PYTHONPATH:-}"
 
+# Resolve torchrun from the uv venv created by gcp_setup.sh, falling back to PATH.
+DATA_DIR="${DATA_DIR:-/data}"
+VENV_DIR="${VENV_DIR:-$DATA_DIR/venv}"
+TORCHRUN="$([[ -x "$VENV_DIR/bin/torchrun" ]] && echo "$VENV_DIR/bin/torchrun" || echo "torchrun")"
+
 # Tiny schedule: 2 "epochs" of 50 iters each = 100 steps. compile off for speed
 # of first iteration and clearer errors during prototyping.
-torchrun --nproc_per_node=1 --master_port="${MASTER_PORT:-29501}" \
+"$TORCHRUN" --nproc_per_node=1 --master_port="${MASTER_PORT:-29501}" \
   "$PKG_DIR/train_ssl4eo.py" \
   --config-file "$PKG_DIR/configs/ssl4eo_s2_vits16.yaml" \
   --output-dir "$OUTPUT_DIR" \

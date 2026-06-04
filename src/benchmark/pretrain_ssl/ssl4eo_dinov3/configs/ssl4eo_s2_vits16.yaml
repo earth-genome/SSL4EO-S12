@@ -85,10 +85,10 @@ crops:
   # the multispectral augmentation): "augment" | "random" | "fixed".
   season: augment
   # --- 12-band normalization statistics (uint8 LMDB scaled to [0,1]) ---------
-  # Defaults below standardize the 2-sigma uint8 encoding to ~[-1, 1].
-  # Recompute exact per-band stats with scripts/compute_band_stats.py and paste.
-  rgb_mean: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
-  rgb_std:  [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25]
+  # Per-band mean/std computed over 20k LMDB samples with compute_band_stats.py
+  # (uint8/255 domain). Band order: B01,B02,B03,B04,B05,B06,B07,B08,B8A,B09,B11,B12.
+  rgb_mean: [0.159306, 0.13778, 0.130426, 0.13545, 0.154441, 0.209745, 0.238204, 0.231014, 0.257409, 0.082109, 0.218811, 0.152579]
+  rgb_std:  [0.078732, 0.08465, 0.087034, 0.112925, 0.110873, 0.113954, 0.124924, 0.122421, 0.1317, 0.057233, 0.132383, 0.113126]
 
 train:
   # Override root on the CLI: train.dataset_path=SSL4EOS2:root=/data/<lmdb>

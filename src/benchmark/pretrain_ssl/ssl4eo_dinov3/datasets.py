@@ -79,7 +79,7 @@ class SSL4EOS2Dataset(VisionDataset):
             import lmdb
 
             env = lmdb.open(
-                self.lmdb_file, max_readers=1, readonly=True, lock=False, readahead=False, meminit=False
+                self.lmdb_file, max_readers=1, readonly=True, lock=False, readahead=True, meminit=False
             )
             with env.begin(write=False) as txn:
                 self.length = txn.stat()["entries"]
@@ -88,8 +88,13 @@ class SSL4EOS2Dataset(VisionDataset):
     def _init_db(self) -> None:
         import lmdb
 
+        # readahead=True (unlike upstream DINOv3's ImageNet default of False):
+        # SSL4EO samples are large contiguous ~3.6MB cubes (seasons x 13 x H x W),
+        # so kernel readahead coalesces each sample into a few large sequential
+        # reads instead of ~900 random 4KB page faults. On an IOPS-capped network
+        # disk this is the difference between being IOPS-bound and bandwidth-bound.
         self.env = lmdb.open(
-            self.lmdb_file, max_readers=1, readonly=True, lock=False, readahead=False, meminit=False
+            self.lmdb_file, max_readers=1, readonly=True, lock=False, readahead=True, meminit=False
         )
 
     def get_image_data(self, index: int) -> np.ndarray:
