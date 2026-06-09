@@ -114,8 +114,12 @@ CONFIG=ssl4eo_dinov3/configs/ssl4eo_s2_vits16.yaml \
 EUROSAT_TRAIN_DIR=... EUROSAT_VAL_DIR=... EUROSAT_TRAIN_Y=... EUROSAT_VAL_Y=... \
 bash ssl4eo_dinov3/eval/run_certification.sh
 ```
-Gates against the original DINO ViT-S/16 baselines (**BigEarthNet 90.5 mAP,
-EuroSAT 99.0 acc, So2Sat 62.2 acc**); a shortfall exits non-zero.
+Gates against the original DINO ViT-S/16 **linear-probing** baselines
+(SSL4EO-S12 paper Table III: **EuroSAT 97.7 acc, BigEarthNet 83.4 mAP, So2Sat
+62.5 acc**); a shortfall exits non-zero. These are the right target because the
+harness trains a probe on *frozen* features — not the Table IV fine-tuning
+numbers (EuroSAT 99.0, BE 90.5, So2Sat 62.2), which require updating the backbone
+and would fail even a perfect frozen-feature reproduction.
 
 ## 5. Production embedding extraction
 

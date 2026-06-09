@@ -1,3 +1,4 @@
 
 # transient training logs
 nohup.out
+restart_train_*.log

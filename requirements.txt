@@ -1,0 +1,46 @@
+# Consolidated requirements for SSL4EO-S12
+#
+# Sources:
+#   src/benchmark/pretrain_ssl/dinov3/requirements.txt
+#   src/benchmark/pretrain_ssl/ssl4eo_dinov3/requirements-gcp.txt
+#   src/benchmark/transfer_classification/models/data2vec/requirements.txt  (torch/torchvision unpinned — 1.7.1 conflicts with dinov3)
+#   src/benchmark/pretrain_ssl/dinov3/requirements-dev.txt
+
+# --- Core ML / PyTorch ---
+torch
+torchvision
+torchmetrics
+timm
+
+# --- DINOv3 core ---
+ftfy
+omegaconf
+regex
+scikit-learn
+submitit
+termcolor
+
+# --- SSL4EO / GCP pipeline ---
+lmdb
+numpy
+tensorboard
+wandb
+google-cloud-storage
+rasterio
+opencv-python-headless
+tqdm
+
+# --- data2vec / misc ---
+Pillow
+blobfile
+requests
+einops
+tensorboardX
+scipy
+
+# --- Dev / lint ---
+docstr-coverage==2.3.2
+mypy[reports]==1.17
+pylint==3.3.8
+ruff==0.12.8
+pytest

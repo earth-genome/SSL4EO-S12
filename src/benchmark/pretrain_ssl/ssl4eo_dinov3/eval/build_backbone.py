@@ -63,7 +63,12 @@ def build_backbone(
         patch_size=s.patch_size,
         in_chans=s.in_chans,
         ffn_layer=s.ffn_layer,
-        ffn_ratio=getattr(s, "ffn_ratio", 4.0),
+        # ffn_ratio is hard-coded by the vit_* factories (4 for small/base), so
+        # passing it here would collide as a duplicate keyword. The config value
+        # matches the factory default, so we let the factory set it.
+        # layerscale_init must be non-None or the blocks use nn.Identity and the
+        # trained ls1/ls2.gamma weights are silently dropped (wrong forward pass).
+        layerscale_init=getattr(s, "layerscale", None),
         n_storage_tokens=s.n_storage_tokens,
         norm_layer=s.norm_layer,
         qkv_bias=getattr(s, "qkv_bias", True),

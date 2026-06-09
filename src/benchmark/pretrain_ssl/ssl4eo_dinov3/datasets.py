@@ -20,10 +20,23 @@ Design choices:
 
 from __future__ import annotations
 
+import os
 import pickle
 from typing import Any, Callable, Optional, Tuple
 
 import numpy as np
+
+# LMDB mmap readahead. Disk-type dependent, so it's an env switch rather than a
+# hardcoded constant:
+#   - Local NVMe / ephemeral SSD: leave OFF (default). Random reads are cheap, so
+#     only the pages each ~3.6MB sample touches are faulted in, keeping page-cache
+#     use bounded. readahead=True here over-reads adjacent pages into cache and
+#     exhausts host RAM (it OOM-killed a 167GB run mid-epoch on 2026-06-05).
+#   - GCP Persistent Disk (network-backed): set SSL4EO_LMDB_READAHEAD=1. There
+#     each page fault is a network round-trip, so coalescing random 4KB faults
+#     into large sequential reads is ~4x faster -- but only run it on a box whose
+#     RAM comfortably exceeds the working set.
+LMDB_READAHEAD = os.environ.get("SSL4EO_LMDB_READAHEAD", "0") not in ("0", "", "false", "False")
 
 try:  # torchvision is only available in the training env, not at lint time
     from torchvision.datasets import VisionDataset
@@ -79,7 +92,7 @@ class SSL4EOS2Dataset(VisionDataset):
             import lmdb
 
             env = lmdb.open(
-                self.lmdb_file, max_readers=1, readonly=True, lock=False, readahead=True, meminit=False
+                self.lmdb_file, max_readers=1, readonly=True, lock=False, readahead=LMDB_READAHEAD, meminit=False
             )
             with env.begin(write=False) as txn:
                 self.length = txn.stat()["entries"]
@@ -88,13 +101,9 @@ class SSL4EOS2Dataset(VisionDataset):
     def _init_db(self) -> None:
         import lmdb
 
-        # readahead=True (unlike upstream DINOv3's ImageNet default of False):
-        # SSL4EO samples are large contiguous ~3.6MB cubes (seasons x 13 x H x W),
-        # so kernel readahead coalesces each sample into a few large sequential
-        # reads instead of ~900 random 4KB page faults. On an IOPS-capped network
-        # disk this is the difference between being IOPS-bound and bandwidth-bound.
+        # readahead controlled by SSL4EO_LMDB_READAHEAD -- see LMDB_READAHEAD above.
         self.env = lmdb.open(
-            self.lmdb_file, max_readers=1, readonly=True, lock=False, readahead=True, meminit=False
+            self.lmdb_file, max_readers=1, readonly=True, lock=False, readahead=LMDB_READAHEAD, meminit=False
         )
 
     def get_image_data(self, index: int) -> np.ndarray:

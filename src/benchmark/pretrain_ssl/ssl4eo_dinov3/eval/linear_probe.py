@@ -3,8 +3,8 @@
 
 Consumes embeddings produced by ``extract_embeddings.py`` plus matching label
 arrays, fits a frozen-feature classifier, and compares the metric to a target
-baseline (e.g. the original DINO ViT-S/16 SSL4EO numbers). Exits non-zero if the
-metric is below ``--baseline - --tolerance`` so it can gate the full GCP run.
+baseline. Exits non-zero if the metric is below ``--baseline - --tolerance`` so
+it can gate the full GCP run.
 
 Tasks:
   - ``multiclass`` (EuroSAT, So2Sat): logistic regression -> top-1 accuracy.
@@ -14,7 +14,10 @@ Inputs are ``.npy`` files:
   --train-x train.npy --train-y train_labels.npy --val-x val.npy --val-y val_labels.npy
 Labels: int class ids (multiclass) or 0/1 matrix ``(N, n_classes)`` (multilabel).
 
-README baselines (DINO ViT-S/16): BigEarthNet 90.5 mAP, EuroSAT 99.0 acc, So2Sat 62.2 acc.
+Gate against the DINO ViT-S/16 LINEAR-PROBING numbers (SSL4EO-S12 paper Table III),
+since this is a frozen probe -- EuroSAT 97.7 acc, BigEarthNet 83.4 mAP, So2Sat 62.5
+acc. (The fine-tuning numbers in Table IV -- EuroSAT 99.0, BE 90.5, So2Sat 62.2 --
+are NOT a valid gate for frozen features.)
 """
 
 from __future__ import annotations
@@ -41,7 +44,9 @@ def _knn_accuracy(train_x, train_y, val_x, val_y, k: int = 20) -> float:
 def _linear_multiclass(train_x, train_y, val_x, val_y) -> float:
     from sklearn.linear_model import LogisticRegression
 
-    clf = LogisticRegression(max_iter=2000, C=1.0, n_jobs=-1, multi_class="auto")
+    # (multinomial is the only behaviour in sklearn >=1.7; the old multi_class
+    # kwarg was removed. "auto" was already the default, so no change in result.)
+    clf = LogisticRegression(max_iter=2000, C=1.0)
     clf.fit(train_x, train_y)
     return float((clf.predict(val_x) == val_y).mean() * 100.0)
 
@@ -55,7 +60,7 @@ def _linear_multilabel(train_x, train_y, val_x, val_y) -> float:
     for c in range(n_classes):
         if train_y[:, c].sum() == 0:
             continue
-        clf = LogisticRegression(max_iter=2000, C=1.0, n_jobs=-1)
+        clf = LogisticRegression(max_iter=2000, C=1.0)
         clf.fit(train_x, train_y[:, c])
         scores[:, c] = clf.predict_proba(val_x)[:, 1]
     return float(average_precision_score(val_y, scores, average="micro") * 100.0)
